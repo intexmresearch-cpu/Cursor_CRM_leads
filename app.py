@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from functools import wraps
 
 from flask import (
-    Flask, request, redirect, url_for, session, render_template, Response
+    Flask, request, redirect, url_for, session, render_template, Response, g
 )
 import clickhouse_connect
 import bcrypt
@@ -42,81 +42,107 @@ RECENT_HOURS_COOLDOWN = 24  # avoid re-assigning numbers attempted in last N hou
 # =========================
 # ====== APP & DB =========
 # =========================
+class DatabaseUnavailable(RuntimeError):
+    """Raised when ClickHouse cannot be reached."""
+
+
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 
+_db_client = None
+
+
 def ch():
-    return clickhouse_connect.get_client(
-        host=CH_HOST, port=CH_PORT, username=CH_USER, password=CH_PASS, database=CH_DB
-    )
+    """Return a cached ClickHouse client or raise DatabaseUnavailable."""
+    global _db_client
+    if _db_client is not None:
+        return _db_client
+    try:
+        _db_client = clickhouse_connect.get_client(
+            host=CH_HOST,
+            port=CH_PORT,
+            username=CH_USER,
+            password=CH_PASS,
+            database=CH_DB,
+        )
+        return _db_client
+    except Exception as exc:  # pragma: no cover - network related
+        _db_client = None
+        app.logger.exception("Unable to connect to ClickHouse", exc_info=exc)
+        raise DatabaseUnavailable("ClickHouse database is unavailable") from exc
 
 def ensure_tables():
-    c = ch()
-    c.command('CREATE DATABASE IF NOT EXISTS Calling_CRM')
+    try:
+        c = ch()
+        c.command('CREATE DATABASE IF NOT EXISTS Calling_CRM')
 
-    # Users table
-    c.command(f'''
-    CREATE TABLE IF NOT EXISTS {USERS_TABLE} (
-        user_id       UUID,
-        name          String,
-        username      LowCardinality(String),
-        password_hash String,
-        role          LowCardinality(String),     -- 'agent' | 'lead' | 'manager'
-        team          LowCardinality(String),     -- e.g. 'A', 'B'
-        manager       LowCardinality(String),     -- e.g. '11'
-        is_active     UInt8 DEFAULT 1,
-        created_at    DateTime DEFAULT now(),
-        last_login    Nullable(DateTime)
-    ) ENGINE = MergeTree
-    ORDER BY (username)
-    ''')
+        # Users table
+        c.command(f'''
+        CREATE TABLE IF NOT EXISTS {USERS_TABLE} (
+            user_id       UUID,
+            name          String,
+            username      LowCardinality(String),
+            password_hash String,
+            role          LowCardinality(String),     -- 'agent' | 'lead' | 'manager'
+            team          LowCardinality(String),     -- e.g. 'A', 'B'
+            manager       LowCardinality(String),     -- e.g. '11'
+            is_active     UInt8 DEFAULT 1,
+            created_at    DateTime DEFAULT now(),
+            last_login    Nullable(DateTime)
+        ) ENGINE = MergeTree
+        ORDER BY (username)
+        ''')
 
-    # Attempts table (append-only)
-    c.command(f'''
-    CREATE TABLE IF NOT EXISTS {ATTEMPTS_TABLE} (
-        attempt_id  UUID,
-        mobile      String,
-        lender      String,
-        amount      Float64,
-        disposition LowCardinality(String),
-        comment     String,
-        agent       String,
-        team        String,
-        manager     String,
-        created_at  DateTime DEFAULT now(),
-        ip          String,
-        ua          String
-    ) ENGINE = MergeTree
-    ORDER BY (mobile, created_at)
-    ''')
+        # Attempts table (append-only)
+        c.command(f'''
+        CREATE TABLE IF NOT EXISTS {ATTEMPTS_TABLE} (
+            attempt_id  UUID,
+            mobile      String,
+            lender      String,
+            amount      Float64,
+            disposition LowCardinality(String),
+            comment     String,
+            agent       String,
+            team        String,
+            manager     String,
+            created_at  DateTime DEFAULT now(),
+            ip          String,
+            ua          String
+        ) ENGINE = MergeTree
+        ORDER BY (mobile, created_at)
+        ''')
 
-    # Callbacks table
-    c.command(f'''
-    CREATE TABLE IF NOT EXISTS {CALLBACKS_TABLE} (
-        callback_id  UUID,
-        mobile       String,
-        schedule_at  DateTime,
-        created_by   String,
-        assigned_to  String DEFAULT '',
-        status       LowCardinality(String) DEFAULT 'open',  -- 'open'|'closed'
-        created_at   DateTime DEFAULT now(),
-        closed_at    Nullable(DateTime)
-    ) ENGINE = MergeTree
-    ORDER BY (mobile, schedule_at)
-    ''')
+        # Callbacks table
+        c.command(f'''
+        CREATE TABLE IF NOT EXISTS {CALLBACKS_TABLE} (
+            callback_id  UUID,
+            mobile       String,
+            schedule_at  DateTime,
+            created_by   String,
+            assigned_to  String DEFAULT '',
+            status       LowCardinality(String) DEFAULT 'open',  -- 'open'|'closed'
+            created_at   DateTime DEFAULT now(),
+            closed_at    Nullable(DateTime)
+        ) ENGINE = MergeTree
+        ORDER BY (mobile, schedule_at)
+        ''')
 
-    # Assignments table
-    c.command(f'''
-    CREATE TABLE IF NOT EXISTS {ASSIGN_TABLE} (
-        assign_id   UUID,
-        mobile      String,
-        agent       String,
-        status      LowCardinality(String) DEFAULT 'open',   -- 'open'|'closed'
-        assigned_at DateTime DEFAULT now(),
-        closed_at   Nullable(DateTime)
-    ) ENGINE = MergeTree
-    ORDER BY (agent, assigned_at)
-    ''')
+        # Assignments table
+        c.command(f'''
+        CREATE TABLE IF NOT EXISTS {ASSIGN_TABLE} (
+            assign_id   UUID,
+            mobile      String,
+            agent       String,
+            status      LowCardinality(String) DEFAULT 'open',   -- 'open'|'closed'
+            assigned_at DateTime DEFAULT now(),
+            closed_at   Nullable(DateTime)
+        ) ENGINE = MergeTree
+        ORDER BY (agent, assigned_at)
+        ''')
+    except DatabaseUnavailable:
+        app.logger.warning("ClickHouse unavailable during startup; continuing without DB.")
+    except Exception as exc:  # pragma: no cover - startup safeguard
+        app.logger.exception("Unexpected error while ensuring ClickHouse tables", exc_info=exc)
 
 ensure_tables()
 
@@ -125,7 +151,7 @@ ensure_tables()
 # =========================
 @app.context_processor
 def inject_globals():
-    return {'datetime': datetime}
+    return {'datetime': datetime, 'db_error': getattr(g, 'db_error', None)}
 
 # =========================
 # ===== USER HELPERS ======
@@ -137,61 +163,109 @@ def get_user(username: str):
     WHERE username = %(u)s
     LIMIT 1
     """
-    rows = list(ch().query(q, parameters={'u': username}).named_results())
-    return rows[0] if rows else None
+    try:
+        client = ch()
+        rows = list(client.query(q, parameters={'u': username}).named_results())
+        return rows[0] if rows else None
+    except DatabaseUnavailable:
+        raise
+    except Exception as exc:
+        app.logger.exception("Unable to fetch user '%s'", username, exc_info=exc)
+        return None
 
 def set_last_login(user_id: str):
-    ch().command(f"""
-        ALTER TABLE {USERS_TABLE}
-        UPDATE last_login = now()
-        WHERE user_id = %(id)s
-    """, parameters={'id': user_id})
+    try:
+        ch().command(f"""
+            ALTER TABLE {USERS_TABLE}
+            UPDATE last_login = now()
+            WHERE user_id = %(id)s
+        """, parameters={'id': user_id})
+    except DatabaseUnavailable:
+        raise
+    except Exception as exc:
+        app.logger.exception("Failed to set last login for user %s", user_id, exc_info=exc)
 
 def list_users():
-    return ch().query(f"""
-        SELECT user_id, name, username, role, team, manager, is_active, created_at, last_login
-        FROM {USERS_TABLE}
-        ORDER BY role DESC, username
-    """).named_results()
+    try:
+        client = ch()
+        return client.query(f"""
+            SELECT user_id, name, username, role, team, manager, is_active, created_at, last_login
+            FROM {USERS_TABLE}
+            ORDER BY role DESC, username
+        """).named_results()
+    except DatabaseUnavailable:
+        raise
+    except Exception as exc:
+        app.logger.exception("Failed to list users", exc_info=exc)
+        return []
 
 def user_exists(username: str) -> bool:
-    r = ch().query(f"SELECT count() FROM {USERS_TABLE} WHERE username = %(u)s", parameters={'u': username}).first_item
-    return int(r or 0) > 0
+    try:
+        client = ch()
+        r = client.query(
+            f"SELECT count() FROM {USERS_TABLE} WHERE username = %(u)s",
+            parameters={'u': username},
+        ).first_item
+        return int(r or 0) > 0
+    except DatabaseUnavailable:
+        raise
+    except Exception as exc:
+        app.logger.exception("Failed to check if user '%s' exists", username, exc_info=exc)
+        return False
 
 def insert_user(name, username, password, role, team, manager, is_active=1):
-    if user_exists(username):
-        return False, "Username already exists"
-    pwd_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-    ch().command(f"""
-        INSERT INTO {USERS_TABLE}
-        (user_id, name, username, password_hash, role, team, manager, is_active)
-        VALUES (%(id)s, %(n)s, %(u)s, %(ph)s, %(r)s, %(t)s, %(m)s, %(ia)s)
-    """, parameters={
-        'id': str(uuid.uuid4()), 'n': name, 'u': username, 'ph': pwd_hash,
-        'r': role, 't': team, 'm': manager, 'ia': int(is_active)
-    })
-    return True, "User created"
+    try:
+        if user_exists(username):
+            return False, "Username already exists"
+        pwd_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        client = ch()
+        client.command(f"""
+            INSERT INTO {USERS_TABLE}
+            (user_id, name, username, password_hash, role, team, manager, is_active)
+            VALUES (%(id)s, %(n)s, %(u)s, %(ph)s, %(r)s, %(t)s, %(m)s, %(ia)s)
+        """, parameters={
+            'id': str(uuid.uuid4()), 'n': name, 'u': username, 'ph': pwd_hash,
+            'r': role, 't': team, 'm': manager, 'ia': int(is_active)
+        })
+        return True, "User created"
+    except DatabaseUnavailable:
+        return False, "Database unavailable. Please try again later."
+    except Exception as exc:
+        app.logger.exception("Failed to insert user '%s'", username, exc_info=exc)
+        return False, "Failed to create user."
 
 def reset_password(username: str, new_password: str):
-    if not user_exists(username):
-        return False, "Username not found"
-    pwd_hash = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-    ch().command(f"""
-        ALTER TABLE {USERS_TABLE}
-        UPDATE password_hash = %(ph)s
-        WHERE username = %(u)s
-    """, parameters={'ph': pwd_hash, 'u': username})
-    return True, "Password updated"
+    try:
+        if not user_exists(username):
+            return False, "Username not found"
+        pwd_hash = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        ch().command(f"""
+            ALTER TABLE {USERS_TABLE}
+            UPDATE password_hash = %(ph)s
+            WHERE username = %(u)s
+        """, parameters={'ph': pwd_hash, 'u': username})
+        return True, "Password updated"
+    except DatabaseUnavailable:
+        return False, "Database unavailable. Please try again later."
+    except Exception as exc:
+        app.logger.exception("Failed to reset password for '%s'", username, exc_info=exc)
+        return False, "Failed to reset password."
 
 def toggle_user(username: str, active: bool):
-    if not user_exists(username):
-        return False, "Username not found"
-    ch().command(f"""
-        ALTER TABLE {USERS_TABLE}
-        UPDATE is_active = %(ia)s
-        WHERE username = %(u)s
-    """, parameters={'ia': int(active), 'u': username})
-    return True, "User status updated"
+    try:
+        if not user_exists(username):
+            return False, "Username not found"
+        ch().command(f"""
+            ALTER TABLE {USERS_TABLE}
+            UPDATE is_active = %(ia)s
+            WHERE username = %(u)s
+        """, parameters={'ia': int(active), 'u': username})
+        return True, "User status updated"
+    except DatabaseUnavailable:
+        return False, "Database unavailable. Please try again later."
+    except Exception as exc:
+        app.logger.exception("Failed to toggle user '%s'", username, exc_info=exc)
+        return False, "Failed to update user."
 
 # =========================
 # ====== AUTH GUARDS ======
@@ -215,7 +289,7 @@ def login_required(role=None):
 # =========================
 # ======= TEMPLATES =======
 # =========================
-BASE_HTML = """
+BASE_HTML = r"""
 <!doctype html>
 <html lang="en">
 <head>
@@ -230,6 +304,161 @@ BASE_HTML = """
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/htmx.org@2.0.3"></script>
   <style>
+    *, *::before, *::after{
+      box-sizing:border-box;
+    }
+    .hidden{display:none!important;}
+    .block{display:block;}
+    .inline-flex{display:inline-flex;}
+    .inline-block{display:inline-block;}
+    .flex{display:flex;}
+    .grid{display:grid;}
+    .min-h-screen{min-height:100vh;}
+    .flex-col{flex-direction:column;}
+    .flex-row{flex-direction:row;}
+    .flex-wrap{flex-wrap:wrap;}
+    .flex-1{flex:1 1 0%;}
+    .items-center{align-items:center;}
+    .items-start{align-items:flex-start;}
+    .items-end{align-items:flex-end;}
+    .justify-between{justify-content:space-between;}
+    .justify-center{justify-content:center;}
+    .justify-start{justify-content:flex-start;}
+    .justify-end{justify-content:flex-end;}
+    .w-full{width:100%;}
+    .w-11{width:2.75rem;}
+    .h-11{height:2.75rem;}
+    .w-2{width:0.5rem;}
+    .h-2{height:0.5rem;}
+    .mx-auto{margin-left:auto;margin-right:auto;}
+    .max-w-7xl{max-width:80rem;}
+    .max-w-5xl{max-width:64rem;}
+    .max-w-md{max-width:28rem;}
+    .max-w-xs{max-width:20rem;}
+    .col-span-2{grid-column:span 2 / span 2;}
+    .grid-cols-2{grid-template-columns:repeat(2,minmax(0,1fr));}
+    .grid-cols-3{grid-template-columns:repeat(3,minmax(0,1fr));}
+    .text-center{text-align:center;}
+    .text-right{text-align:right;}
+    .uppercase{text-transform:uppercase;}
+    .truncate{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .whitespace-nowrap{white-space:nowrap;}
+    .font-semibold{font-weight:600;}
+    .font-medium{font-weight:500;}
+    .font-bold{font-weight:700;}
+    .text-xs{font-size:0.75rem;}
+    .text-sm{font-size:0.875rem;}
+    .text-base{font-size:1rem;}
+    .text-lg{font-size:1.125rem;}
+    .text-xl{font-size:1.25rem;}
+    .text-2xl{font-size:1.5rem;}
+    .text-3xl{font-size:1.875rem;}
+    .text-4xl{font-size:2.25rem;}
+    .leading-tight{line-height:1.25;}
+    .leading-relaxed{line-height:1.6;}
+    .space-y-2 > * + *{margin-top:0.5rem;}
+    .space-y-4 > * + *{margin-top:1rem;}
+    .space-y-8 > * + *{margin-top:2rem;}
+    .gap-1{gap:0.25rem;}
+    .gap-2{gap:0.5rem;}
+    .gap-3{gap:0.75rem;}
+    .gap-4{gap:1rem;}
+    .gap-5{gap:1.25rem;}
+    .gap-6{gap:1.5rem;}
+    .gap-8{gap:2rem;}
+    .mt-1{margin-top:0.25rem;}
+    .mt-2{margin-top:0.5rem;}
+    .mt-3{margin-top:0.75rem;}
+    .mt-4{margin-top:1rem;}
+    .mt-5{margin-top:1.25rem;}
+    .mt-6{margin-top:1.5rem;}
+    .mt-8{margin-top:2rem;}
+    .mb-2{margin-bottom:0.5rem;}
+    .mb-3{margin-bottom:0.75rem;}
+    .mb-6{margin-bottom:1.5rem;}
+    .mb-8{margin-bottom:2rem;}
+    .py-2{padding-top:0.5rem;padding-bottom:0.5rem;}
+    .py-4{padding-top:1rem;padding-bottom:1rem;}
+    .py-5{padding-top:1.25rem;padding-bottom:1.25rem;}
+    .py-6{padding-top:1.5rem;padding-bottom:1.5rem;}
+    .py-7{padding-top:1.75rem;padding-bottom:1.75rem;}
+    .py-8{padding-top:2rem;padding-bottom:2rem;}
+    .px-4{padding-left:1rem;padding-right:1rem;}
+    .px-6{padding-left:1.5rem;padding-right:1.5rem;}
+    .px-8{padding-left:2rem;padding-right:2rem;}
+    .p-2{padding:0.5rem;}
+    .p-3{padding:0.75rem;}
+    .p-4{padding:1rem;}
+    .p-5{padding:1.25rem;}
+    .p-6{padding:1.5rem;}
+    .p-8{padding:2rem;}
+    .rounded{border-radius:0.25rem;}
+    .rounded-lg{border-radius:0.5rem;}
+    .rounded-xl{border-radius:0.75rem;}
+    .rounded-2xl{border-radius:1.25rem;}
+    .rounded-full{border-radius:9999px;}
+    .border{border:1px solid var(--line, #e2e8f0);}
+    .border-b{border-bottom:1px solid var(--line, #e2e8f0);}
+    .border-t{border-top:1px solid var(--line, #e2e8f0);}
+    .shadow-sm{box-shadow:0 1px 3px rgba(15,23,42,0.1);}
+    .shadow-2xl{box-shadow:0 25px 50px -12px rgba(15,23,42,0.45);}
+    .sticky{position:sticky;}
+    .top-0{top:0;}
+    .z-40{z-index:40;}
+    .backdrop-blur{backdrop-filter:blur(12px);}
+    .opacity-80{opacity:0.8;}
+    .opacity-85{opacity:0.85;}
+    .text-slate-400{color:#94a3b8;}
+    .text-slate-500{color:#64748b;}
+    .text-slate-600{color:#475569;}
+    .text-slate-800{color:#1e293b;}
+    .text-indigo-600{color:#4f46e5;}
+    .text-emerald-500{color:#10b981;}
+    .text-sky-600{color:#0284c7;}
+    .bg-white{background:#ffffff;}
+    .bg-white\\/90{background:rgba(255,255,255,0.9);}
+    .bg-white\\/80{background:rgba(255,255,255,0.8);}
+    .bg-white\\/70{background:rgba(255,255,255,0.7);}
+    .bg-white\\/60{background:rgba(255,255,255,0.6);}
+    .bg-sky-100{background:#e0f2fe;}
+    .bg-slate-50{background:#f8fafc;}
+    .bg-yellow-50{background:#fefce8;}
+    .bg-emerald-500{background:#10b981;}
+    .text-white{color:#ffffff;}
+    .border-white{border-color:#ffffff;}
+    .border-white\\/50{border-color:rgba(255,255,255,0.5);}
+    .border-white\\/60{border-color:rgba(255,255,255,0.6);}
+    .tracking-\\[0\\.28em\\]{letter-spacing:0.28em;}
+    .tracking-\\[0\\.2em\\]{letter-spacing:0.2em;}
+    .tracking-\\[0\\.22em\\]{letter-spacing:0.22em;}
+    .alert{padding:0.9rem 1.1rem;border-radius:0.85rem;margin-bottom:1rem;font-size:0.85rem;background:#fef3c7;color:#92400e;border:1px solid #fcd34d;}
+    .alert.error{background:#fee2e2;color:#991b1b;border-color:#fca5a5;}
+    @media (min-width:640px){
+      .sm\\:grid-cols-2{grid-template-columns:repeat(2,minmax(0,1fr));}
+    }
+    @media (min-width:768px){
+      .md\\:flex{display:flex;}
+      .md\\:grid{display:grid;}
+      .md\\:hidden{display:none!important;}
+      .md\\:block{display:block;}
+      .md\\:flex-row{flex-direction:row;}
+      .md\\:items-center{align-items:center;}
+      .md\\:justify-between{justify-content:space-between;}
+      .md\\:grid-cols-2{grid-template-columns:repeat(2,minmax(0,1fr));}
+      .md\\:grid-cols-3{grid-template-columns:repeat(3,minmax(0,1fr));}
+      .md\\:grid-cols-5{grid-template-columns:repeat(5,minmax(0,1fr));}
+      .md\\:col-span-2{grid-column:span 2 / span 2;}
+      .md\\:w-auto{width:auto;}
+      .md\\:flex-1{flex:1 1 0%;}
+    }
+    @media (min-width:1024px){
+      .lg\\:grid-cols-2{grid-template-columns:repeat(2,minmax(0,1fr));}
+      .lg\\:grid-cols-\[2fr_1fr\]{grid-template-columns:2fr 1fr;}
+    }
+    @media (min-width:1280px){
+      .xl\\:grid-cols-2{grid-template-columns:repeat(2,minmax(0,1fr));}
+      .xl\\:grid-cols-4{grid-template-columns:repeat(4,minmax(0,1fr));}
+    }
     :root{
       --ink:#0f172a;
       --muted:#64748b;
@@ -249,6 +478,8 @@ BASE_HTML = """
       background:radial-gradient(circle at top left,#e0f2fe 0%,#f5f3ff 40%,#f8fafc 70%);
       color:var(--ink);
       font-family:'Inter','Manrope',system-ui,sans-serif;
+      margin:0;
+      line-height:1.6;
       -webkit-font-smoothing:antialiased;
     }
     h1,h2,h3,h4{
@@ -590,6 +821,9 @@ BASE_HTML = """
       </div>
     </header>
     <main id="page" class="mx-auto w-full max-w-7xl flex-1 px-4 py-8">
+      {% if db_error %}
+      <div class="alert">{{ db_error }}</div>
+      {% endif %}
       {% block content %}{% endblock %}
     </main>
     <footer class="border-t border-white/60 bg-white/70 py-4 text-center text-xs text-slate-500">
@@ -1172,7 +1406,12 @@ def login():
         u = request.form.get('username','').strip()
         p = request.form.get('password','')
 
-        rec = get_user(u)
+        try:
+            rec = get_user(u)
+        except DatabaseUnavailable:
+            g.db_error = "Database connection is currently unavailable. Please try again later."
+            return render_template('login.html', error="Service temporarily unavailable")
+
         if rec and rec['is_active'] == 1:
             try:
                 if bcrypt.checkpw(p.encode('utf-8'), rec['password_hash'].encode('utf-8')):
@@ -1181,10 +1420,15 @@ def login():
                     session['role']    = rec['role']
                     session['team']    = rec['team']
                     session['manager'] = rec['manager']
-                    set_last_login(rec['user_id'])
+                    try:
+                        set_last_login(rec['user_id'])
+                    except DatabaseUnavailable:
+                        g.db_error = "Database connection is currently unavailable. Activity tracking may be delayed."
+                    except Exception as exc:
+                        app.logger.exception("Failed to set last login", exc_info=exc)
                     return redirect(request.args.get('next') or url_for('home'))
-            except Exception:
-                pass
+            except Exception as exc:
+                app.logger.exception("Login failure for user '%s'", u, exc_info=exc)
         return render_template('login.html', error="Invalid credentials")
     return render_template('login.html', error=None)
 
@@ -1197,7 +1441,6 @@ def logout():
 @login_required()
 def home():
     user = session.get('user')
-    client = ch()
 
     stats = {
         'today_attempts': 0,
@@ -1212,6 +1455,7 @@ def home():
     recent_attempts = []
 
     try:
+        client = ch()
         today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
         summary = client.query(f"""
@@ -1299,8 +1543,11 @@ def home():
             streak += 1
             cursor_day = cursor_day - timedelta(days=1)
         stats['streak_days'] = streak
-    except Exception:
-        pass
+    except DatabaseUnavailable:
+        g.db_error = "Live data is currently unavailable. You're viewing cached defaults."
+    except Exception as exc:
+        app.logger.exception("Failed to load home dashboard for '%s'", user, exc_info=exc)
+        g.db_error = "We couldn't load your latest stats. Please try refreshing shortly."
 
     return render_template('home.html', stats=stats, upcoming=upcoming, recent_attempts=recent_attempts)
 
@@ -1311,9 +1558,9 @@ def lookup():
     if not mobile:
         return '<div class="p-3 border rounded-lg bg-yellow-50">Enter a mobile.</div>'
 
-    client = ch()
     lead = None
     try:
+        client = ch()
         q = f"""
         SELECT Lead_date, Lender, Mobile, Amount
         FROM {LEADS_TABLE}
@@ -1323,8 +1570,11 @@ def lookup():
         """
         rows = list(client.query(q, parameters={'mobile': mobile}).named_results())
         lead = rows[0] if rows else None
-    except Exception:
-        lead = None
+    except DatabaseUnavailable:
+        return '<div class="alert error">Database unavailable. Please try again later.</div>', 503
+    except Exception as exc:
+        app.logger.exception("Lookup failed for mobile %s", mobile, exc_info=exc)
+        return '<div class="alert error">Unable to fetch lead details right now.</div>', 500
 
     return render_template('lookup_partial.html',
                            table=LEADS_TABLE,
@@ -1336,14 +1586,21 @@ def lookup():
 @login_required()
 def history():
     mobile = request.args.get('mobile','').strip()
-    rows = ch().query(f"""
-        SELECT created_at, agent, disposition, comment
-        FROM {ATTEMPTS_TABLE}
-        WHERE mobile = %(m)s
-        ORDER BY created_at DESC
-        LIMIT 200
-    """, parameters={'m': mobile}).named_results()
-    return render_template('history_partial.html', rows=rows)
+    try:
+        client = ch()
+        rows = client.query(f"""
+            SELECT created_at, agent, disposition, comment
+            FROM {ATTEMPTS_TABLE}
+            WHERE mobile = %(m)s
+            ORDER BY created_at DESC
+            LIMIT 200
+        """, parameters={'m': mobile}).named_results()
+        return render_template('history_partial.html', rows=rows)
+    except DatabaseUnavailable:
+        return '<div class="alert error">History unavailable while the database is offline.</div>', 503
+    except Exception as exc:
+        app.logger.exception("Failed to fetch history for %s", mobile, exc_info=exc)
+        return '<div class="alert error">Unable to load history right now.</div>', 500
 
 @app.route('/add_attempt', methods=['POST'])
 @login_required()
@@ -1367,56 +1624,64 @@ def add_attempt():
     meta_ip = request.headers.get('X-Forwarded-For', request.remote_addr) or ''
     meta_ua = (request.user_agent.string or '')[:500]
 
-    # 1) Insert attempt
-    ch().command(f"""
-    INSERT INTO {ATTEMPTS_TABLE}
-        (attempt_id, mobile, lender, amount, disposition, comment, agent, team, manager, ip, ua)
-    VALUES
-        (%(id)s, %(m)s, %(l)s, %(a)s, %(d)s, %(c)s, %(ag)s, %(t)s, %(mg)s, %(ip)s, %(ua)s)
-    """, parameters={
-        'id': str(uuid.uuid4()), 'm': mobile, 'l': lender, 'a': amount, 'd': disposition, 'c': comment,
-        'ag': user, 't': team, 'mg': manager, 'ip': meta_ip, 'ua': meta_ua
-    })
+    try:
+        client = ch()
 
-    # 2) Schedule callback if provided
-    if next_followup_at_raw:
-        try:
-            schedule_at = datetime.strptime(next_followup_at_raw, "%Y-%m-%dT%H:%M")
-            ch().command(f"""
-                INSERT INTO {CALLBACKS_TABLE}
-                (callback_id, mobile, schedule_at, created_by, assigned_to, status)
-                VALUES (%(id)s, %(m)s, %(s)s, %(by)s, %(assn)s, 'open')
-            """, parameters={
-                'id': str(uuid.uuid4()), 'm': mobile, 's': schedule_at,
-                'by': user, 'assn': user  # assign to self by default
-            })
-        except Exception:
-            pass
+        # 1) Insert attempt
+        client.command(f"""
+        INSERT INTO {ATTEMPTS_TABLE}
+            (attempt_id, mobile, lender, amount, disposition, comment, agent, team, manager, ip, ua)
+        VALUES
+            (%(id)s, %(m)s, %(l)s, %(a)s, %(d)s, %(c)s, %(ag)s, %(t)s, %(mg)s, %(ip)s, %(ua)s)
+        """, parameters={
+            'id': str(uuid.uuid4()), 'm': mobile, 'l': lender, 'a': amount, 'd': disposition, 'c': comment,
+            'ag': user, 't': team, 'mg': manager, 'ip': meta_ip, 'ua': meta_ua
+        })
 
-    # 3) Resolve open callbacks for this mobile if requested
-    if resolve_callback:
-        ch().command(f"""
-            ALTER TABLE {CALLBACKS_TABLE}
+        # 2) Schedule callback if provided
+        if next_followup_at_raw:
+            try:
+                schedule_at = datetime.strptime(next_followup_at_raw, "%Y-%m-%dT%H:%M")
+                client.command(f"""
+                    INSERT INTO {CALLBACKS_TABLE}
+                    (callback_id, mobile, schedule_at, created_by, assigned_to, status)
+                    VALUES (%(id)s, %(m)s, %(s)s, %(by)s, %(assn)s, 'open')
+                """, parameters={
+                    'id': str(uuid.uuid4()), 'm': mobile, 's': schedule_at,
+                    'by': user, 'assn': user  # assign to self by default
+                })
+            except ValueError:
+                app.logger.warning("Invalid follow-up datetime '%s' for mobile %s", next_followup_at_raw, mobile)
+
+        # 3) Resolve open callbacks for this mobile if requested
+        if resolve_callback:
+            client.command(f"""
+                ALTER TABLE {CALLBACKS_TABLE}
+                UPDATE status = 'closed', closed_at = now()
+                WHERE mobile = %(m)s AND status = 'open'
+            """, parameters={'m': mobile})
+
+        # 4) Close open assignment for this agent & mobile (worked on)
+        client.command(f"""
+            ALTER TABLE {ASSIGN_TABLE}
             UPDATE status = 'closed', closed_at = now()
-            WHERE mobile = %(m)s AND status = 'open'
-        """, parameters={'m': mobile})
+            WHERE mobile = %(m)s AND agent = %(a)s AND status = 'open'
+        """, parameters={'m': mobile, 'a': user})
 
-    # 4) Close open assignment for this agent & mobile (worked on)
-    ch().command(f"""
-        ALTER TABLE {ASSIGN_TABLE}
-        UPDATE status = 'closed', closed_at = now()
-        WHERE mobile = %(m)s AND agent = %(a)s AND status = 'open'
-    """, parameters={'m': mobile, 'a': user})
-
-    # Return updated history partial
-    rows = ch().query(f"""
-        SELECT created_at, agent, disposition, comment
-        FROM {ATTEMPTS_TABLE}
-        WHERE mobile = %(m)s
-        ORDER BY created_at DESC
-        LIMIT 200
-    """, parameters={'m': mobile}).named_results()
-    return render_template('history_partial.html', rows=rows)
+        # Return updated history partial
+        rows = client.query(f"""
+            SELECT created_at, agent, disposition, comment
+            FROM {ATTEMPTS_TABLE}
+            WHERE mobile = %(m)s
+            ORDER BY created_at DESC
+            LIMIT 200
+        """, parameters={'m': mobile}).named_results()
+        return render_template('history_partial.html', rows=rows)
+    except DatabaseUnavailable:
+        return '<div class="alert error">Unable to save attempt while the database is offline.</div>', 503
+    except Exception as exc:
+        app.logger.exception("Failed to add attempt for %s", mobile, exc_info=exc)
+        return '<div class="alert error">Something went wrong while saving. Please retry.</div>', 500
 
 # ------- Agent Queue -------
 @app.route('/queue')
@@ -1424,38 +1689,54 @@ def add_attempt():
 def queue():
     agent = session.get('user')
 
-    # Due callbacks (assigned to me and open)
-    due = ch().query(f"""
-        SELECT mobile, schedule_at, assigned_to, status
-        FROM {CALLBACKS_TABLE}
-        WHERE status = 'open' AND assigned_to = %(a)s AND schedule_at <= now()
-        ORDER BY schedule_at ASC
-        LIMIT 200
-    """, parameters={'a': agent}).named_results()
+    try:
+        client = ch()
 
-    # Upcoming (next 24h) callbacks assigned to me
-    upcoming = ch().query(f"""
-        SELECT mobile, schedule_at
-        FROM {CALLBACKS_TABLE}
-        WHERE status = 'open' AND assigned_to = %(a)s
-          AND schedule_at > now() AND schedule_at <= now() + INTERVAL 1 DAY
-        ORDER BY schedule_at ASC
-        LIMIT 200
-    """, parameters={'a': agent}).named_results()
+        # Due callbacks (assigned to me and open)
+        due = client.query(f"""
+            SELECT mobile, schedule_at, assigned_to, status
+            FROM {CALLBACKS_TABLE}
+            WHERE status = 'open' AND assigned_to = %(a)s AND schedule_at <= now()
+            ORDER BY schedule_at ASC
+            LIMIT 200
+        """, parameters={'a': agent}).named_results()
 
-    # Open assignments for me
-    open_assn = ch().query(f"""
-        SELECT mobile, assigned_at
-        FROM {ASSIGN_TABLE}
-        WHERE agent = %(a)s AND status = 'open'
-        ORDER BY assigned_at DESC
-        LIMIT 200
-    """, parameters={'a': agent}).named_results()
+        # Upcoming (next 24h) callbacks assigned to me
+        upcoming = client.query(f"""
+            SELECT mobile, schedule_at
+            FROM {CALLBACKS_TABLE}
+            WHERE status = 'open' AND assigned_to = %(a)s
+              AND schedule_at > now() AND schedule_at <= now() + INTERVAL 1 DAY
+            ORDER BY schedule_at ASC
+            LIMIT 200
+        """, parameters={'a': agent}).named_results()
 
-    return render_template('queue.html',
-                           due_callbacks=due,
-                           upcoming_callbacks=upcoming,
-                           open_assignments=open_assn)
+        # Open assignments for me
+        open_assn = client.query(f"""
+            SELECT mobile, assigned_at
+            FROM {ASSIGN_TABLE}
+            WHERE agent = %(a)s AND status = 'open'
+            ORDER BY assigned_at DESC
+            LIMIT 200
+        """, parameters={'a': agent}).named_results()
+
+        return render_template('queue.html',
+                               due_callbacks=due,
+                               upcoming_callbacks=upcoming,
+                               open_assignments=open_assn)
+    except DatabaseUnavailable:
+        g.db_error = "Queue data unavailable while the database is offline."
+        return render_template('queue.html',
+                               due_callbacks=[],
+                               upcoming_callbacks=[],
+                               open_assignments=[]), 503
+    except Exception as exc:
+        app.logger.exception("Failed to load queue for '%s'", agent, exc_info=exc)
+        g.db_error = "We couldn't load your queue. Please try again later."
+        return render_template('queue.html',
+                               due_callbacks=[],
+                               upcoming_callbacks=[],
+                               open_assignments=[]), 500
 
 @app.route('/assign-next')
 @login_required()
@@ -1467,69 +1748,79 @@ def assign_next():
     """
     agent = session.get('user')
 
-    # Helper to create assignment and redirect
-    def _assign_and_redirect(mobile: str):
-        ch().command(f"""
-            INSERT INTO {ASSIGN_TABLE} (assign_id, mobile, agent)
-            VALUES (%(id)s, %(m)s, %(a)s)
-        """, parameters={'id': str(uuid.uuid4()), 'm': mobile, 'a': agent})
-        return redirect(url_for('lookup') + f'?mobile={mobile}')
+    try:
+        client = ch()
 
-    # 1) Due callbacks already assigned to this agent
-    rows = list(ch().query(f"""
-        SELECT mobile
-        FROM {CALLBACKS_TABLE}
-        WHERE status = 'open' AND assigned_to = %(a)s AND schedule_at <= now()
-        ORDER BY schedule_at ASC
-        LIMIT 1
-    """, parameters={'a': agent}).named_results())
-    if rows:
-        return _assign_and_redirect(rows[0]['mobile'])
+        # Helper to create assignment and redirect
+        def _assign_and_redirect(mobile: str):
+            client.command(f"""
+                INSERT INTO {ASSIGN_TABLE} (assign_id, mobile, agent)
+                VALUES (%(id)s, %(m)s, %(a)s)
+            """, parameters={'id': str(uuid.uuid4()), 'm': mobile, 'a': agent})
+            return redirect(url_for('lookup') + f'?mobile={mobile}')
 
-    # 2) Unassigned due callbacks ? take ownership
-    rows = list(ch().query(f"""
-        SELECT mobile
-        FROM {CALLBACKS_TABLE}
-        WHERE status = 'open' AND (assigned_to = '' OR assigned_to = ' ')
-          AND schedule_at <= now()
-        ORDER BY schedule_at ASC
-        LIMIT 1
-    """).named_results())
-    if rows:
-        mobile = rows[0]['mobile']
-        ch().command(f"""
-            ALTER TABLE {CALLBACKS_TABLE}
-            UPDATE assigned_to = %(a)s
-            WHERE mobile = %(m)s AND status = 'open' AND schedule_at <= now()
-            LIMIT 1
-        """, parameters={'a': agent, 'm': mobile})
-        return _assign_and_redirect(mobile)
-
-    # 3) Fresh lead: not assigned and not attempted in recent hours by anyone
-    rows = list(ch().query(f"""
-        WITH recent_cutoff AS (now() - INTERVAL {RECENT_HOURS_COOLDOWN} HOUR)
-        SELECT L.Mobile AS mobile
-        FROM {LEADS_TABLE} AS L
-        LEFT JOIN (
+        # 1) Due callbacks already assigned to this agent
+        rows = list(client.query(f"""
             SELECT mobile
-            FROM {ASSIGN_TABLE}
-            WHERE status = 'open'
-            GROUP BY mobile
-        ) AS A ON A.mobile = L.Mobile
-        WHERE A.mobile IS NULL
-          AND L.Mobile NOT IN (
-            SELECT DISTINCT mobile
-            FROM {ATTEMPTS_TABLE}
-            WHERE created_at >= recent_cutoff
-          )
-        ORDER BY L.Lead_date DESC
-        LIMIT 1
-    """).named_results())
+            FROM {CALLBACKS_TABLE}
+            WHERE status = 'open' AND assigned_to = %(a)s AND schedule_at <= now()
+            ORDER BY schedule_at ASC
+            LIMIT 1
+        """, parameters={'a': agent}).named_results())
+        if rows:
+            return _assign_and_redirect(rows[0]['mobile'])
 
-    if rows:
-        return _assign_and_redirect(rows[0]['mobile'])
+        # 2) Unassigned due callbacks ? take ownership
+        rows = list(client.query(f"""
+            SELECT mobile
+            FROM {CALLBACKS_TABLE}
+            WHERE status = 'open' AND (assigned_to = '' OR assigned_to = ' ')
+              AND schedule_at <= now()
+            ORDER BY schedule_at ASC
+            LIMIT 1
+        """).named_results())
+        if rows:
+            mobile = rows[0]['mobile']
+            client.command(f"""
+                ALTER TABLE {CALLBACKS_TABLE}
+                UPDATE assigned_to = %(a)s
+                WHERE mobile = %(m)s AND status = 'open' AND schedule_at <= now()
+                LIMIT 1
+            """, parameters={'a': agent, 'm': mobile})
+            return _assign_and_redirect(mobile)
 
-    return redirect(url_for('queue'))
+        # 3) Fresh lead: not assigned and not attempted in recent hours by anyone
+        rows = list(client.query(f"""
+            WITH recent_cutoff AS (now() - INTERVAL {RECENT_HOURS_COOLDOWN} HOUR)
+            SELECT L.Mobile AS mobile
+            FROM {LEADS_TABLE} AS L
+            LEFT JOIN (
+                SELECT mobile
+                FROM {ASSIGN_TABLE}
+                WHERE status = 'open'
+                GROUP BY mobile
+            ) AS A ON A.mobile = L.Mobile
+            WHERE A.mobile IS NULL
+              AND L.Mobile NOT IN (
+                SELECT DISTINCT mobile
+                FROM {ATTEMPTS_TABLE}
+                WHERE created_at >= recent_cutoff
+              )
+            ORDER BY L.Lead_date DESC
+            LIMIT 1
+        """).named_results())
+
+        if rows:
+            return _assign_and_redirect(rows[0]['mobile'])
+
+        return redirect(url_for('queue'))
+    except DatabaseUnavailable:
+        g.db_error = "Cannot assign a new lead while the database is offline."
+        return redirect(url_for('queue'))
+    except Exception as exc:
+        app.logger.exception("Failed to assign next lead for '%s'", agent, exc_info=exc)
+        g.db_error = "We couldn't assign a new lead right now. Please try again." 
+        return redirect(url_for('queue'))
 
 # ------- Overview / Logs / Export -------
 @app.route('/overview')
@@ -1549,43 +1840,64 @@ def overview():
         where.append("team = %(team)s"); params['team'] = q_team
     where_sql = " AND ".join(where)
 
-    client = ch()
-    by_day = client.query(f"""
-        SELECT toDate(created_at) AS d,
-               count() AS attempts,
-               countIf(disposition LIKE 'Connected%') AS connected
-        FROM {ATTEMPTS_TABLE}
-        WHERE {where_sql}
-        GROUP BY d
-        ORDER BY d DESC
-        LIMIT 60
-    """, parameters=params).named_results()
+    try:
+        client = ch()
+        by_day = client.query(f"""
+            SELECT toDate(created_at) AS d,
+                   count() AS attempts,
+                   countIf(disposition LIKE 'Connected%') AS connected
+            FROM {ATTEMPTS_TABLE}
+            WHERE {where_sql}
+            GROUP BY d
+            ORDER BY d DESC
+            LIMIT 60
+        """, parameters=params).named_results()
 
-    by_agent = client.query(f"""
-        SELECT agent,
-               count() AS attempts,
-               countIf(disposition LIKE 'Connected%') AS connected
-        FROM {ATTEMPTS_TABLE}
-        WHERE {where_sql}
-        GROUP BY agent
-        ORDER BY attempts DESC
-        LIMIT 100
-    """, parameters=params).named_results()
+        by_agent = client.query(f"""
+            SELECT agent,
+                   count() AS attempts,
+                   countIf(disposition LIKE 'Connected%') AS connected
+            FROM {ATTEMPTS_TABLE}
+            WHERE {where_sql}
+            GROUP BY agent
+            ORDER BY attempts DESC
+            LIMIT 100
+        """, parameters=params).named_results()
 
-    return render_template('overview.html',
-                           by_day=by_day, by_agent=by_agent,
-                           q_from=q_from, q_to=q_to, q_agent=q_agent, q_team=q_team)
+        return render_template('overview.html',
+                               by_day=by_day, by_agent=by_agent,
+                               q_from=q_from, q_to=q_to, q_agent=q_agent, q_team=q_team)
+    except DatabaseUnavailable:
+        g.db_error = "Analytics are unavailable while the database is offline."
+        return render_template('overview.html',
+                               by_day=[], by_agent=[],
+                               q_from=q_from, q_to=q_to, q_agent=q_agent, q_team=q_team), 503
+    except Exception as exc:
+        app.logger.exception("Failed to build overview", exc_info=exc)
+        g.db_error = "We couldn't load analytics right now. Please try again later."
+        return render_template('overview.html',
+                               by_day=[], by_agent=[],
+                               q_from=q_from, q_to=q_to, q_agent=q_agent, q_team=q_team), 500
 
 @app.route('/logs')
 @login_required()
 def logs():
-    rows = ch().query(f"""
-        SELECT created_at, mobile, lender, amount, agent, disposition, comment
-        FROM {ATTEMPTS_TABLE}
-        ORDER BY created_at DESC
-        LIMIT 200
-    """).named_results()
-    return render_template('logs.html', rows=rows)
+    try:
+        client = ch()
+        rows = client.query(f"""
+            SELECT created_at, mobile, lender, amount, agent, disposition, comment
+            FROM {ATTEMPTS_TABLE}
+            ORDER BY created_at DESC
+            LIMIT 200
+        """).named_results()
+        return render_template('logs.html', rows=rows)
+    except DatabaseUnavailable:
+        g.db_error = "Logs are unavailable while the database is offline."
+        return render_template('logs.html', rows=[]), 503
+    except Exception as exc:
+        app.logger.exception("Failed to load logs", exc_info=exc)
+        g.db_error = "We couldn't load recent attempts. Please try again later."
+        return render_template('logs.html', rows=[]), 500
 
 @app.route('/export.csv')
 @login_required(role='lead')
@@ -1604,34 +1916,45 @@ def export_csv():
         where.append("team = %(team)s"); params['team'] = q_team
     where_sql = " AND ".join(where)
 
-    data = ch().query(f"""
-        SELECT created_at, mobile, lender, amount, agent, team, manager, disposition, comment, ip, ua
-        FROM {ATTEMPTS_TABLE}
-        WHERE {where_sql}
-        ORDER BY created_at DESC
-    """, parameters=params)
+    try:
+        client = ch()
+        data = client.query(f"""
+            SELECT created_at, mobile, lender, amount, agent, team, manager, disposition, comment, ip, ua
+            FROM {ATTEMPTS_TABLE}
+            WHERE {where_sql}
+            ORDER BY created_at DESC
+        """, parameters=params)
 
-    def generate():
-        header = ["created_at","mobile","lender","amount","agent","team","manager","disposition","comment","ip","ua"]
-        yield ",".join(header) + "\n"
-        for row in data.result_rows:
-            vals = []
-            for v in row:
-                s = "" if v is None else str(v)
-                if any(c in s for c in [",", "\n", '"']):
-                    s = '"' + s.replace('"','""') + '"'
-                vals.append(s)
-            yield ",".join(vals) + "\n"
+        def generate():
+            header = ["created_at","mobile","lender","amount","agent","team","manager","disposition","comment","ip","ua"]
+            yield ",".join(header) + "\n"
+            for row in data.result_rows:
+                vals = []
+                for v in row:
+                    s = "" if v is None else str(v)
+                    if any(c in s for c in [",", "\n", '"']):
+                        s = '"' + s.replace('"','""') + '"'
+                    vals.append(s)
+                yield ",".join(vals) + "\n"
 
-    filename = f"call_attempts_{q_from}_to_{q_to}.csv"
-    return Response(generate(), mimetype='text/csv',
-                    headers={"Content-Disposition": f"attachment; filename={filename}"})
+        filename = f"call_attempts_{q_from}_to_{q_to}.csv"
+        return Response(generate(), mimetype='text/csv',
+                        headers={"Content-Disposition": f"attachment; filename={filename}"})
+    except DatabaseUnavailable:
+        return Response("Database unavailable. Please try again later.", status=503, mimetype='text/plain')
+    except Exception as exc:
+        app.logger.exception("Failed to export CSV", exc_info=exc)
+        return Response("Unexpected error while generating export.", status=500, mimetype='text/plain')
 
 # -------- Admin (Manager only) --------
 @app.route('/admin/users')
 @login_required(role='manager')
 def admin_users():
-    users = list_users()
+    try:
+        users = list_users()
+    except DatabaseUnavailable:
+        g.db_error = "Admin tools unavailable while the database is offline."
+        users = []
     return render_template('admin_users.html', users=users, msg=None)
 
 @app.route('/admin/users/add', methods=['POST'])
@@ -1645,8 +1968,13 @@ def admin_add_user():
     manager  = (request.form.get('manager') or '').strip()
 
     ok, msg = insert_user(name, username, password, role, team, manager or session.get('user'))
-    users = list_users()
-    return render_template('admin_users.html', users=users, msg=msg)
+    try:
+        users = list_users()
+    except DatabaseUnavailable:
+        g.db_error = "Admin tools unavailable while the database is offline."
+        users = []
+    status_code = 200 if ok else 500
+    return render_template('admin_users.html', users=users, msg=msg), status_code
 
 @app.route('/admin/users/reset', methods=['POST'])
 @login_required(role='manager')
@@ -1654,8 +1982,13 @@ def admin_reset_password():
     username    = (request.form.get('username') or '').strip()
     new_password = (request.form.get('new_password') or '').strip()
     ok, msg = reset_password(username, new_password)
-    users = list_users()
-    return render_template('admin_users.html', users=users, msg=msg)
+    try:
+        users = list_users()
+    except DatabaseUnavailable:
+        g.db_error = "Admin tools unavailable while the database is offline."
+        users = []
+    status_code = 200 if ok else 500
+    return render_template('admin_users.html', users=users, msg=msg), status_code
 
 @app.route('/admin/users/toggle', methods=['POST'])
 @login_required(role='manager')
@@ -1663,8 +1996,13 @@ def admin_toggle_user():
     username = (request.form.get('username') or '').strip()
     active   = (request.form.get('active') or '1') in ('1','true','yes')
     ok, msg = toggle_user(username, active)
-    users = list_users()
-    return render_template('admin_users.html', users=users, msg=msg)
+    try:
+        users = list_users()
+    except DatabaseUnavailable:
+        g.db_error = "Admin tools unavailable while the database is offline."
+        users = []
+    status_code = 200 if ok else 500
+    return render_template('admin_users.html', users=users, msg=msg), status_code
 
 # =========================
 # ======== BOOT ===========

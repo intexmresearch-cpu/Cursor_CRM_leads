@@ -121,6 +121,13 @@ def ensure_tables():
 ensure_tables()
 
 # =========================
+# ==== CONTEXT GLOBALS ====
+# =========================
+@app.context_processor
+def inject_globals():
+    return {'datetime': datetime}
+
+# =========================
 # ===== USER HELPERS ======
 # =========================
 def get_user(username: str):
@@ -214,92 +221,606 @@ BASE_HTML = """
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Calling CRM</title>
+  <meta name="color-scheme" content="light"/>
+  <title>{% block title %}Calling CRM{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Poppins:wght@500;600;700&family=Space+Mono:wght@400;700&family=Manrope:wght@500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:wght,FILL,GRAD,opsz@400,0,0,48" rel="stylesheet" />
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/htmx.org@2.0.3"></script>
   <style>
-    :root{ --ink:#0f172a; --muted:#64748b; --line:#e5e7eb; }
-    body{ background:#f7fafc; color:var(--ink); }
-    .card{ background:#fff; border:1px solid rgba(2,6,23,.06); border-radius:1rem; box-shadow:0 1px 2px rgba(2,6,23,.05); }
-    .btn{ padding:.6rem 1rem; border-radius:.75rem; border:1px solid #e5e7eb; background:#0ea5e9; color:#fff; }
-    .btn-secondary{ background:#f8fafc; color:#0f172a; }
-    .chip{ font-size:.75rem; padding:.2rem .5rem; border-radius:.5rem; border:1px solid #e5e7eb; background:#f8fafc; }
-    .tbl th{ background:#f8fafc; font-weight:600; }
-    .tbl td, .tbl th { border-bottom:1px solid #eef2f7; padding:.5rem .75rem; }
-    .link{ color:#0ea5e9; text-decoration:underline; }
+    :root{
+      --ink:#0f172a;
+      --muted:#64748b;
+      --line:#e2e8f0;
+      --surface:#ffffff;
+      --surface-muted:#f8fafc;
+      --accent:#0ea5e9;
+      --accent-strong:#0284c7;
+      --accent-soft:#e0f2fe;
+      --warning:#f97316;
+      --success:#10b981;
+      --indigo:#6366f1;
+      --plum:#a855f7;
+      --rose:#f43f5e;
+    }
+    body{
+      background:radial-gradient(circle at top left,#e0f2fe 0%,#f5f3ff 40%,#f8fafc 70%);
+      color:var(--ink);
+      font-family:'Inter','Manrope',system-ui,sans-serif;
+      -webkit-font-smoothing:antialiased;
+    }
+    h1,h2,h3,h4{
+      font-family:'Poppins','Inter',sans-serif;
+      letter-spacing:-0.01em;
+    }
+    code,.font-mono{
+      font-family:'Space Mono',monospace;
+    }
+    .card{
+      background:var(--surface);
+      border:1px solid rgba(2,6,23,.06);
+      border-radius:1rem;
+      box-shadow:0 12px 24px -16px rgba(15,23,42,.35);
+      transition:transform .2s ease, box-shadow .2s ease;
+    }
+    .card:hover{
+      transform:translateY(-2px);
+      box-shadow:0 16px 32px -20px rgba(15,23,42,.4);
+    }
+    .btn{
+      padding:.65rem 1.1rem;
+      border-radius:.85rem;
+      border:1px solid transparent;
+      background:linear-gradient(135deg,var(--accent),var(--accent-strong));
+      color:#fff;
+      font-weight:600;
+      font-family:'Manrope','Inter',sans-serif;
+      transition:transform .18s ease, box-shadow .18s ease;
+      box-shadow:0 10px 18px -12px rgba(2,132,199,.8);
+    }
+    .btn:hover{
+      transform:translateY(-1px);
+      box-shadow:0 14px 28px -18px rgba(2,132,199,.85);
+    }
+    .btn-secondary{
+      background:var(--surface);
+      border:1px solid var(--line);
+      color:var(--ink);
+      border-radius:.85rem;
+      padding:.55rem 1rem;
+      font-family:'Manrope','Inter',sans-serif;
+      transition:background .18s ease, color .18s ease, transform .18s ease;
+    }
+    .btn-secondary:hover{
+      background:var(--surface-muted);
+      transform:translateY(-1px);
+    }
+    .btn-ghost{
+      padding:.5rem .9rem;
+      border-radius:.75rem;
+      color:var(--muted);
+      font-family:'Manrope','Inter',sans-serif;
+    }
+    .material-symbols-rounded{
+      font-variation-settings:'FILL' 0,'wght' 400,'GRAD' 0,'opsz' 24;
+      font-size:1.35rem;
+      line-height:1;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+    }
+    .stat-card{
+      border-radius:1.5rem;
+      padding:1.5rem;
+      background:var(--surface);
+      border:1px solid rgba(148,163,184,.12);
+      box-shadow:0 22px 32px -24px rgba(15,23,42,.45);
+      position:relative;
+      overflow:hidden;
+    }
+    .stat-card::after{
+      content:"";
+      position:absolute;
+      inset:auto -40% -40% auto;
+      width:8rem;
+      height:8rem;
+      border-radius:999px;
+      background:rgba(255,255,255,.2);
+      filter:blur(0.5px);
+      transform:translate(40%,40%);
+    }
+    .stat-card__icon{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      width:2.75rem;
+      height:2.75rem;
+      border-radius:1rem;
+      background:rgba(255,255,255,.25);
+      margin-bottom:.75rem;
+    }
+    .stat-card__value{
+      font-size:2.6rem;
+      font-weight:600;
+      letter-spacing:-0.03em;
+    }
+    .stat-card__label{
+      text-transform:uppercase;
+      font-size:.68rem;
+      font-weight:700;
+      letter-spacing:.22em;
+    }
+    .stat-card--sky{
+      background:linear-gradient(140deg,#0ea5e9 0%,#0284c7 100%);
+      color:#ecfeff;
+    }
+    .stat-card--sunrise{
+      background:linear-gradient(140deg,#fb7185 0%,#f43f5e 100%);
+      color:#fff7fb;
+    }
+    .stat-card--lime{
+      background:linear-gradient(140deg,#34d399 0%,#10b981 100%);
+      color:#ecfdf5;
+    }
+    .stat-card--violet{
+      background:linear-gradient(145deg,#a855f7 0%,#6366f1 100%);
+      color:#f5f3ff;
+    }
+    .chip{
+      font-size:.75rem;
+      padding:.35rem .7rem;
+      border-radius:999px;
+      border:1px solid rgba(15,23,42,.1);
+      background:rgba(241,245,249,.8);
+      backdrop-filter:blur(8px);
+      display:inline-flex;
+      align-items:center;
+      gap:.35rem;
+    }
+    .quick-link{
+      display:flex;
+      align-items:center;
+      gap:.75rem;
+      padding:.75rem 1rem;
+      border-radius:1.1rem;
+      border:1px solid rgba(148,163,184,.18);
+      background:linear-gradient(135deg,#f8fafc,rgba(148,163,184,.08));
+      transition:transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+      color:var(--ink);
+      text-decoration:none;
+    }
+    .quick-link:hover{
+      transform:translateY(-2px);
+      border-color:rgba(14,165,233,.45);
+      box-shadow:0 18px 32px -22px rgba(14,165,233,.75);
+    }
+    .quick-link__icon{
+      display:inline-flex;
+      width:2.25rem;
+      height:2.25rem;
+      border-radius:0.9rem;
+      align-items:center;
+      justify-content:center;
+      background:rgba(14,165,233,.14);
+      color:var(--accent-strong);
+    }
+    .tbl{
+      border-radius:1rem;
+      overflow:hidden;
+      background:var(--surface);
+    }
+    .tbl thead th{
+      background:linear-gradient(120deg,rgba(99,102,241,.12),rgba(14,165,233,.12));
+      font-weight:600;
+      text-transform:uppercase;
+      letter-spacing:.08em;
+      font-size:.7rem;
+      color:var(--muted);
+    }
+    .tbl td,
+    .tbl th{
+      border-bottom:1px solid #e2e8f0;
+      padding:.65rem .9rem;
+    }
+    .list-tile{
+      display:flex;
+      gap:.8rem;
+      padding:1rem 1.1rem;
+      border-radius:1.1rem;
+      border:1px solid rgba(148,163,184,.12);
+      background:rgba(255,255,255,.65);
+      transition:transform .18s ease, border-color .18s ease;
+    }
+    .list-tile:not(:last-child){
+      margin-bottom:.8rem;
+    }
+    .list-tile:hover{
+      transform:translateY(-2px);
+      border-color:rgba(14,165,233,.4);
+    }
+    .list-tile__icon{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      width:2.4rem;
+      height:2.4rem;
+      border-radius:.9rem;
+      background:rgba(99,102,241,.08);
+      color:var(--indigo);
+      flex-shrink:0;
+    }
+    .tip-list li{
+      display:flex;
+      align-items:flex-start;
+      gap:.65rem;
+      line-height:1.4;
+    }
+    .tip-list .material-symbols-rounded{
+      font-size:1rem;
+      margin-top:.15rem;
+      color:var(--accent-strong);
+    }
+    .link{
+      color:var(--accent-strong);
+      text-decoration:none;
+      font-weight:500;
+    }
+    .link:hover{
+      text-decoration:underline;
+    }
+    .nav-link{
+      display:inline-flex;
+      align-items:center;
+      gap:.45rem;
+      padding:.45rem .75rem;
+      border-radius:.75rem;
+      color:var(--muted);
+      font-weight:500;
+      transition:color .18s ease, background .18s ease, transform .18s ease;
+    }
+    .nav-link:hover{
+      color:var(--ink);
+      background:rgba(148,163,184,.12);
+    }
+    .nav-link-active{
+      color:var(--ink);
+      background:rgba(14,165,233,.16);
+    }
+    .input{
+      border-radius:.9rem;
+      border:1px solid rgba(148,163,184,.3);
+      padding:.6rem .85rem;
+      width:100%;
+      transition:border-color .18s ease, box-shadow .18s ease;
+    }
+    .input:focus{
+      outline:none;
+      border-color:rgba(14,165,233,.6);
+      box-shadow:0 0 0 4px rgba(14,165,233,.1);
+    }
+    .badge{
+      display:inline-flex;
+      align-items:center;
+      gap:.3rem;
+      padding:.3rem .65rem;
+      border-radius:999px;
+      background:rgba(14,165,233,.12);
+      color:var(--accent-strong);
+      font-size:.7rem;
+      font-weight:600;
+    }
+    .htmx-indicator{
+      position:fixed;
+      inset:0;
+      background:rgba(15,23,42,.12);
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      z-index:50;
+      backdrop-filter:blur(3px);
+    }
+    .htmx-indicator .spinner{
+      width:3rem;
+      height:3rem;
+      border-radius:999px;
+      border:4px solid rgba(14,165,233,.35);
+      border-top-color:var(--accent-strong);
+      animation:spin 1s linear infinite;
+    }
+    @keyframes spin{
+      to{ transform:rotate(360deg); }
+    }
   </style>
 </head>
-<body class="min-h-screen">
-  <div class="max-w-7xl mx-auto px-4 py-6">
-    <div class="flex items-center justify-between mb-6">
-      <h1 class="text-2xl font-semibold">📞 Calling CRM</h1>
-      <div class="text-sm space-x-2">
+<body class="min-h-screen font-sans">
+  <div id="htmx-indicator" class="htmx-indicator hidden" role="status" aria-live="polite">
+    <div class="flex flex-col items-center gap-3 rounded-2xl bg-white/90 px-8 py-7 shadow-2xl">
+      <div class="spinner"></div>
+      <p class="text-sm font-medium text-slate-600">Updating...</p>
+    </div>
+  </div>
+  <div class="flex min-h-screen flex-col">
+    <header class="sticky top-0 z-40 border-b border-white/50 bg-white/80 shadow-sm backdrop-blur">
+      <div class="mx-auto flex w-full max-w-7xl items-center justify-between px-4 py-4">
+        <div class="flex items-center gap-3">
+          <div class="flex h-11 w-11 items-center justify-center rounded-xl bg-sky-100 text-indigo-600">
+            <span class="material-symbols-rounded" aria-hidden="true">support_agent</span>
+          </div>
+          <div>
+            <p class="text-sm uppercase tracking-[0.28em] text-slate-400">Calling CRM</p>
+            <h1 class="text-xl font-semibold text-slate-800">Agent Workspace</h1>
+          </div>
+        </div>
         {% if session.user %}
-          <a class="chip" href="{{ url_for('home') }}">Home</a>
-          <a class="chip" href="{{ url_for('queue') }}">My Queue</a>
-          <a class="chip" href="{{ url_for('assign_next') }}">🎯 Assign Next</a>
-          <a class="chip" href="{{ url_for('overview') }}">Overview</a>
-          <a class="chip" href="{{ url_for('logs') }}">Logs</a>
+        <nav class="hidden items-center gap-1 text-sm font-medium md:flex">
+          {% set nav_links = [
+            ('home', 'home', 'Home'),
+            ('queue', 'checklist', 'My Queue'),
+            ('assign_next', 'my_location', 'Assign Next'),
+            ('overview', 'insights', 'Overview'),
+            ('logs', 'history', 'Logs')
+          ] %}
+          {% for ep, icon, label in nav_links %}
+            <a href="{{ url_for(ep) }}" class="nav-link {% if request.endpoint == ep %}nav-link-active{% endif %}" aria-current="{% if request.endpoint == ep %}page{% else %}false{% endif %}">
+              <span class="material-symbols-rounded" aria-hidden="true">{{ icon }}</span>
+              <span>{{ label }}</span>
+            </a>
+          {% endfor %}
           {% if session.role == 'manager' %}
-            <a href="{{ url_for('admin_users') }}" class="chip">Admin Users</a>
+            <a href="{{ url_for('admin_users') }}" class="nav-link {% if request.endpoint == 'admin_users' %}nav-link-active{% endif %}">
+              <span class="material-symbols-rounded" aria-hidden="true">shield_person</span>
+              <span>Admin</span>
+            </a>
           {% endif %}
-          <span class="chip">User: {{session.user}} ({{session.role}})</span>
-          <a href="{{ url_for('logout') }}" class="chip">Logout</a>
+        </nav>
+        <div class="flex items-center gap-2">
+          <div class="hidden items-center gap-2 md:flex">
+            <span class="chip">
+              <span class="inline-flex h-2 w-2 rounded-full bg-emerald-500"></span>
+              {{ session.user }}
+              <span class="text-slate-500">- {{ session.role }}</span>
+            </span>
+            <a href="{{ url_for('logout') }}" class="btn-secondary">Log out</a>
+          </div>
+          <button type="button" class="btn-secondary md:hidden" hx-get="{{ url_for('queue') }}" hx-target="#page" hx-swap="innerHTML" aria-label="Open quick queue">Menu</button>
+        </div>
         {% endif %}
       </div>
-    </div>
-    {% block content %}{% endblock %}
+    </header>
+    <main id="page" class="mx-auto w-full max-w-7xl flex-1 px-4 py-8">
+      {% block content %}{% endblock %}
+    </main>
+    <footer class="border-t border-white/60 bg-white/70 py-4 text-center text-xs text-slate-500">
+      <p>&copy; {{ datetime.utcnow().year }} Calling CRM. Crafted for delightful calling experiences.</p>
+    </footer>
   </div>
+  <script>
+    document.addEventListener('DOMContentLoaded', function(){
+      var indicator = document.getElementById('htmx-indicator');
+      if(!indicator || !window.htmx){ return; }
+      document.body.addEventListener('htmx:beforeRequest', function(){
+        indicator.classList.remove('hidden');
+      });
+      document.body.addEventListener('htmx:afterRequest', function(){
+        indicator.classList.add('hidden');
+      });
+      document.body.addEventListener('htmx:responseError', function(){
+        indicator.classList.add('hidden');
+      });
+    });
+  </script>
 </body>
 </html>
 """
 
 LOGIN_HTML = """
 {% extends "base.html" %}
+{% block title %}Sign In - Calling CRM{% endblock %}
 {% block content %}
-<div class="max-w-md mx-auto card p-6">
-  <h2 class="text-xl font-semibold mb-4">Sign in</h2>
-  <form method="post" class="space-y-3">
-    <div>
-      <label class="text-sm text-slate-600">Username</label>
-      <input name="username" class="w-full border rounded-lg p-2" required />
-    </div>
-    <div>
-      <label class="text-sm text-slate-600">Password</label>
-      <input name="password" type="password" class="w-full border rounded-lg p-2" required />
-    </div>
-    <button class="btn w-full">Login</button>
-    {% if error %}<p class="text-red-600 text-sm mt-2">{{ error }}</p>{% endif %}
-  </form>
+<div class="mx-auto flex max-w-5xl flex-col items-center gap-6 text-center">
+  <div class="space-y-2">
+    <span class="chip text-xs">Calling CRM</span>
+    <h2 class="text-3xl font-semibold text-slate-800">Welcome back</h2>
+    <p class="text-sm text-slate-500">Log in to access your calling workspace, queues and live analytics.</p>
+  </div>
+  <div class="card w-full max-w-md p-8 text-left">
+    <form method="post" class="space-y-4">
+      <div>
+        <label class="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Username</label>
+        <input name="username" class="input mt-2" placeholder="your.username" autocomplete="username" required />
+      </div>
+      <div>
+        <div class="flex items-center justify-between text-xs">
+          <label class="font-semibold uppercase tracking-[0.2em] text-slate-500">Password</label>
+        </div>
+        <input name="password" type="password" class="input mt-2" placeholder="********" autocomplete="current-password" required />
+      </div>
+      <button class="btn w-full">Sign in</button>
+      {% if error %}<p class="text-sm text-red-500">{{ error }}</p>{% endif %}
+    </form>
+  </div>
 </div>
 {% endblock %}
 """
 
 HOME_HTML = """
 {% extends "base.html" %}
+{% block title %}Dashboard - Calling CRM{% endblock %}
 {% block content %}
-<div class="grid md:grid-cols-3 gap-4">
-  <div class="md:col-span-2 card p-5">
-    <h2 class="font-semibold mb-3">Search Mobile</h2>
-    <form hx-get="{{ url_for('lookup') }}" hx-target="#result" class="flex gap-2">
-      <input name="mobile" placeholder="91XXXXXXXXXX" class="flex-1 border rounded-lg p-2" required>
-      <button class="btn">Search</button>
-    </form>
-    <div id="result" class="mt-4"></div>
-  </div>
-
-  <div class="card p-5">
-    <h2 class="font-semibold mb-3">Quick Actions</h2>
-    <div class="flex flex-col gap-2">
-      <a class="btn" href="{{ url_for('assign_next') }}">🎯 Assign Next</a>
-      <a class="btn-secondary p-2 rounded-lg border" href="{{ url_for('queue') }}">📋 My Queue</a>
-      <a class="btn-secondary p-2 rounded-lg border" href="{{ url_for('overview') }}">📊 Team Overview</a>
-      <a class="btn-secondary p-2 rounded-lg border" href="{{ url_for('logs') }}">🧾 Recent Logs</a>
-      {% if session.role in ('lead','manager') %}
-      <a class="btn-secondary p-2 rounded-lg border" href="{{ url_for('export_csv') }}">⬇️ Export CSV</a>
-      {% endif %}
+<div class="space-y-8">
+  <section class="grid gap-4 lg:grid-cols-[2fr_1fr]">
+    <div class="card p-6">
+      <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+        <div>
+          <p class="text-sm text-slate-500">Welcome back, {{ session.user }}.</p>
+          <h2 class="text-2xl font-semibold text-slate-800">Let's make great calls today.</h2>
+          <p class="mt-1 text-sm text-slate-500">Track your calling impact and action the next best lead in a couple of clicks.</p>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <a class="btn" href="{{ url_for('assign_next') }}">Start calling</a>
+          <a class="btn-secondary" href="{{ url_for('queue') }}">View queue</a>
+        </div>
+      </div>
+      <div class="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <div class="stat-card stat-card--sky">
+          <div class="stat-card__icon"><span class="material-symbols-rounded" aria-hidden="true">phone_in_talk</span></div>
+          <p class="stat-card__label">Calls today</p>
+          <p class="stat-card__value">{{ stats.today_attempts }}</p>
+          <p class="text-xs opacity-80">{{ stats.today_connected }} connected</p>
+        </div>
+        <div class="stat-card stat-card--sunrise">
+          <div class="stat-card__icon"><span class="material-symbols-rounded" aria-hidden="true">event_available</span></div>
+          <p class="stat-card__label">Due callbacks</p>
+          <p class="stat-card__value">{{ stats.due_callbacks }}</p>
+          <p class="text-xs opacity-85">Ready to action now</p>
+        </div>
+        <div class="stat-card stat-card--lime">
+          <div class="stat-card__icon"><span class="material-symbols-rounded" aria-hidden="true">schedule</span></div>
+          <p class="stat-card__label">Upcoming 24h</p>
+          <p class="stat-card__value">{{ stats.upcoming_callbacks }}</p>
+          <p class="text-xs opacity-85">Keep your pipeline warm</p>
+        </div>
+        <div class="stat-card stat-card--violet">
+          <div class="stat-card__icon"><span class="material-symbols-rounded" aria-hidden="true">assignment</span></div>
+          <p class="stat-card__label">Open assignments</p>
+          <p class="stat-card__value">{{ stats.open_assignments }}</p>
+          <p class="text-xs opacity-85">Awaiting follow-up</p>
+        </div>
+      </div>
+      <div class="mt-6 flex flex-wrap items-center gap-3 text-sm text-slate-500">
+        <span class="badge">Last attempt - {{ stats.last_attempt or '-' }}</span>
+        <span class="badge">Streak - {{ stats.streak_days }} day{{ 's' if stats.streak_days != 1 else '' }}</span>
+      </div>
     </div>
-  </div>
+    <div class="card flex flex-col justify-between gap-5 p-6">
+      <div>
+        <h3 class="text-lg font-semibold text-slate-800">Quick actions</h3>
+        <p class="mt-1 text-sm text-slate-500">Jump to your most common workflows.</p>
+      </div>
+      <div class="flex flex-col gap-3 text-sm">
+        <a class="quick-link" href="{{ url_for('assign_next') }}">
+          <span class="quick-link__icon material-symbols-rounded" aria-hidden="true">my_location</span>
+          <span>
+            <span class="block text-sm font-semibold">Assign next lead</span>
+            <span class="block text-xs text-slate-500">Auto-pull the best number to call now.</span>
+          </span>
+        </a>
+        <a class="quick-link" href="{{ url_for('queue') }}">
+          <span class="quick-link__icon material-symbols-rounded" aria-hidden="true">checklist</span>
+          <span>
+            <span class="block text-sm font-semibold">Open my queue</span>
+            <span class="block text-xs text-slate-500">Review due callbacks and assignments.</span>
+          </span>
+        </a>
+        <a class="quick-link" href="{{ url_for('logs') }}">
+          <span class="quick-link__icon material-symbols-rounded" aria-hidden="true">history_edu</span>
+          <span>
+            <span class="block text-sm font-semibold">Recent logs</span>
+            <span class="block text-xs text-slate-500">See the latest attempts you recorded.</span>
+          </span>
+        </a>
+        <a class="quick-link" href="{{ url_for('overview') }}">
+          <span class="quick-link__icon material-symbols-rounded" aria-hidden="true">insights</span>
+          <span>
+            <span class="block text-sm font-semibold">Team overview</span>
+            <span class="block text-xs text-slate-500">Track performance trends across the floor.</span>
+          </span>
+        </a>
+        {% if session.role in ('lead','manager') %}
+        <a class="quick-link" href="{{ url_for('export_csv') }}">
+          <span class="quick-link__icon material-symbols-rounded" aria-hidden="true">download</span>
+          <span>
+            <span class="block text-sm font-semibold">Export CSV</span>
+            <span class="block text-xs text-slate-500">Pull detailed call data for offline analysis.</span>
+          </span>
+        </a>
+        {% endif %}
+        {% if session.role == 'manager' %}
+        <a class="quick-link" href="{{ url_for('admin_users') }}">
+          <span class="quick-link__icon material-symbols-rounded" aria-hidden="true">admin_panel_settings</span>
+          <span>
+            <span class="block text-sm font-semibold">Manage users</span>
+            <span class="block text-xs text-slate-500">Invite teammates, reset passwords, toggle access.</span>
+          </span>
+        </a>
+        {% endif %}
+      </div>
+      <p class="text-xs text-slate-400">Tip: press Shift + / to search within the page.</p>
+    </div>
+  </section>
+
+  <section class="grid gap-6 lg:grid-cols-[2fr_1fr]">
+    <div class="card p-6">
+      <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+        <div>
+          <h3 class="text-lg font-semibold text-slate-800">Search a lead</h3>
+          <p class="text-sm text-slate-500">Find complete history for any mobile number.</p>
+        </div>
+        <div class="text-xs text-slate-400">Powered by live ClickHouse data</div>
+      </div>
+      <form hx-get="{{ url_for('lookup') }}" hx-target="#result" hx-indicator="#htmx-indicator" class="mt-5 flex flex-col gap-3 md:flex-row">
+        <input name="mobile" placeholder="Enter mobile number (e.g. 91XXXXXXXXXX)" class="input md:flex-1" required>
+        <button class="btn md:w-auto">Search</button>
+      </form>
+      <div id="result" class="mt-6"></div>
+    </div>
+    <div class="card p-6">
+      <h3 class="text-lg font-semibold text-slate-800">Upcoming callbacks</h3>
+      <p class="mt-1 text-sm text-slate-500">Here is what is coming up shortly.</p>
+      <div class="mt-4">
+        {% for cb in upcoming %}
+          <div class="list-tile">
+            <div class="list-tile__icon">
+              <span class="material-symbols-rounded" aria-hidden="true">alarm</span>
+            </div>
+            <div class="flex-1">
+              <p class="font-medium text-slate-800">{{ cb['mobile'] }}</p>
+              <p class="text-xs text-slate-500">Scheduled {{ cb['schedule_at'] }}</p>
+              <a class="mt-2 inline-flex items-center text-xs font-semibold text-sky-600" href="{{ url_for('lookup') }}?mobile={{ cb['mobile'] }}">Open details</a>
+            </div>
+          </div>
+        {% else %}
+          <p class="py-8 text-center text-sm text-slate-500">No callbacks scheduled. Add a follow-up from any attempt.</p>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+
+  <section class="grid gap-6 xl:grid-cols-2">
+    <div class="card p-6">
+      <div class="flex items-center justify-between">
+        <h3 class="text-lg font-semibold text-slate-800">Recent activity</h3>
+        <a class="text-xs font-semibold uppercase tracking-[0.2em] text-sky-600" href="{{ url_for('logs') }}">View all</a>
+      </div>
+      <table class="mt-4 w-full tbl text-sm">
+        <thead><tr><th>When</th><th>Mobile</th><th>Outcome</th><th>Notes</th></tr></thead>
+        <tbody>
+        {% for attempt in recent_attempts %}
+          <tr>
+            <td class="whitespace-nowrap text-slate-500">{{ attempt['created_at'] }}</td>
+            <td class="font-medium text-slate-800">{{ attempt['mobile'] }}</td>
+            <td>{{ attempt['disposition'] }}</td>
+            <td class="max-w-xs truncate text-slate-500">{{ attempt['comment'] or '-' }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="4" class="py-6 text-center text-slate-500">Your next attempt will show here. Let's get calling!</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card p-6">
+      <h3 class="text-lg font-semibold text-slate-800">Focus tips</h3>
+      <ul class="mt-4 tip-list text-sm text-slate-600">
+        <li><span class="material-symbols-rounded" aria-hidden="true">rocket_launch</span><span>Block 30 minute calling sprints to power through your queue.</span></li>
+        <li><span class="material-symbols-rounded" aria-hidden="true">edit_note</span><span>Capture objections and commitments in the comment field for easy reference.</span></li>
+        <li><span class="material-symbols-rounded" aria-hidden="true">event_upcoming</span><span>Schedule callbacks with context so you never lose momentum.</span></li>
+        <li><span class="material-symbols-rounded" aria-hidden="true">lightbulb</span><span>Scan recent activity before dialing to personalise your opener.</span></li>
+      </ul>
+    </div>
+  </section>
 </div>
 {% endblock %}
 """
@@ -410,7 +931,7 @@ QUEUE_HTML = """
   <div class="card p-5 md:col-span-2">
     <div class="flex items-center justify-between">
       <h2 class="font-semibold mb-3">My Due Callbacks</h2>
-      <a class="btn" href="{{ url_for('assign_next') }}">🎯 Assign Next</a>
+      <a class="btn" href="{{ url_for('assign_next') }}">Assign next</a>
     </div>
     <table class="w-full tbl text-sm">
       <thead><tr><th>When</th><th>Mobile</th><th>Assigned</th><th>Status</th><th>Action</th></tr></thead>
@@ -625,7 +1146,7 @@ ADMIN_USERS_HTML = """
 {% endblock %}
 """
 
-# —— Register templates once via DictLoader (fixes recursion) ——
+# Register templates once via DictLoader (fixes recursion)
 app.jinja_loader = DictLoader({
     'base.html':         BASE_HTML,
     'login.html':        LOGIN_HTML,
@@ -675,7 +1196,113 @@ def logout():
 @app.route('/')
 @login_required()
 def home():
-    return render_template('home.html')
+    user = session.get('user')
+    client = ch()
+
+    stats = {
+        'today_attempts': 0,
+        'today_connected': 0,
+        'due_callbacks': 0,
+        'upcoming_callbacks': 0,
+        'open_assignments': 0,
+        'last_attempt': None,
+        'streak_days': 0,
+    }
+    upcoming = []
+    recent_attempts = []
+
+    try:
+        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+        summary = client.query(f"""
+            SELECT
+                count() AS attempts,
+                countIf(disposition LIKE 'Connected%') AS connected,
+                max(created_at) AS last_attempt
+            FROM {ATTEMPTS_TABLE}
+            WHERE agent = %(agent)s AND created_at >= %(start)s
+        """, parameters={'agent': user, 'start': today_start}).named_results()
+        if summary:
+            row = summary[0]
+            stats['today_attempts'] = int(row.get('attempts') or 0)
+            stats['today_connected'] = int(row.get('connected') or 0)
+            last_attempt = row.get('last_attempt')
+            if isinstance(last_attempt, datetime):
+                stats['last_attempt'] = last_attempt.strftime('%d %b %Y %H:%M')
+            else:
+                stats['last_attempt'] = last_attempt
+
+        due_callbacks = client.query(f"""
+            SELECT count()
+            FROM {CALLBACKS_TABLE}
+            WHERE status = 'open' AND assigned_to = %(agent)s AND schedule_at <= now()
+        """, parameters={'agent': user}).first_item
+        stats['due_callbacks'] = int(due_callbacks or 0)
+
+        upcoming_count = client.query(f"""
+            SELECT count()
+            FROM {CALLBACKS_TABLE}
+            WHERE status = 'open' AND assigned_to = %(agent)s
+              AND schedule_at > now() AND schedule_at <= now() + INTERVAL 1 DAY
+        """, parameters={'agent': user}).first_item
+        stats['upcoming_callbacks'] = int(upcoming_count or 0)
+
+        open_assignments = client.query(f"""
+            SELECT count()
+            FROM {ASSIGN_TABLE}
+            WHERE agent = %(agent)s AND status = 'open'
+        """, parameters={'agent': user}).first_item
+        stats['open_assignments'] = int(open_assignments or 0)
+
+        upcoming_rows = client.query(f"""
+            SELECT mobile, schedule_at
+            FROM {CALLBACKS_TABLE}
+            WHERE status = 'open' AND assigned_to = %(agent)s
+              AND schedule_at > now()
+            ORDER BY schedule_at ASC
+            LIMIT 5
+        """, parameters={'agent': user}).named_results()
+        upcoming = []
+        for row in upcoming_rows:
+            item = dict(row)
+            sched = item.get('schedule_at')
+            if isinstance(sched, datetime):
+                item['schedule_at'] = sched.strftime('%d %b %Y %H:%M')
+            upcoming.append(item)
+
+        attempt_rows = client.query(f"""
+            SELECT created_at, mobile, disposition, comment
+            FROM {ATTEMPTS_TABLE}
+            WHERE agent = %(agent)s
+            ORDER BY created_at DESC
+            LIMIT 7
+        """, parameters={'agent': user}).named_results()
+        recent_attempts = []
+        for row in attempt_rows:
+            item = dict(row)
+            created = item.get('created_at')
+            if isinstance(created, datetime):
+                item['created_at'] = created.strftime('%d %b %Y %H:%M')
+            recent_attempts.append(item)
+
+        streak_rows = client.query(f"""
+            SELECT toDate(created_at) AS d
+            FROM {ATTEMPTS_TABLE}
+            WHERE agent = %(agent)s AND created_at >= now() - INTERVAL 21 DAY
+            GROUP BY d
+            ORDER BY d DESC
+        """, parameters={'agent': user}).named_results()
+        days_with_attempts = {row['d'] for row in streak_rows}
+        streak = 0
+        cursor_day = datetime.now().date()
+        while cursor_day in days_with_attempts:
+            streak += 1
+            cursor_day = cursor_day - timedelta(days=1)
+        stats['streak_days'] = streak
+    except Exception:
+        pass
+
+    return render_template('home.html', stats=stats, upcoming=upcoming, recent_attempts=recent_attempts)
 
 @app.route('/lookup')
 @login_required()
@@ -859,7 +1486,7 @@ def assign_next():
     if rows:
         return _assign_and_redirect(rows[0]['mobile'])
 
-    # 2) Unassigned due callbacks → take ownership
+    # 2) Unassigned due callbacks ? take ownership
     rows = list(ch().query(f"""
         SELECT mobile
         FROM {CALLBACKS_TABLE}

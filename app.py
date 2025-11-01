@@ -130,7 +130,7 @@ def get_user(username: str):
     WHERE username = %(u)s
     LIMIT 1
     """
-    rows = ch().query(q, parameters={'u': username}).named_results()
+    rows = list(ch().query(q, parameters={'u': username}).named_results())
     return rows[0] if rows else None
 
 def set_last_login(user_id: str):
@@ -694,7 +694,7 @@ def lookup():
         ORDER BY Lead_date DESC
         LIMIT 1
         """
-        rows = client.query(q, parameters={'mobile': mobile}).named_results()
+        rows = list(client.query(q, parameters={'mobile': mobile}).named_results())
         lead = rows[0] if rows else None
     except Exception:
         lead = None
@@ -849,25 +849,25 @@ def assign_next():
         return redirect(url_for('lookup') + f'?mobile={mobile}')
 
     # 1) Due callbacks already assigned to this agent
-    rows = ch().query(f"""
+    rows = list(ch().query(f"""
         SELECT mobile
         FROM {CALLBACKS_TABLE}
         WHERE status = 'open' AND assigned_to = %(a)s AND schedule_at <= now()
         ORDER BY schedule_at ASC
         LIMIT 1
-    """, parameters={'a': agent}).named_results()
+    """, parameters={'a': agent}).named_results())
     if rows:
         return _assign_and_redirect(rows[0]['mobile'])
 
     # 2) Unassigned due callbacks → take ownership
-    rows = ch().query(f"""
+    rows = list(ch().query(f"""
         SELECT mobile
         FROM {CALLBACKS_TABLE}
         WHERE status = 'open' AND (assigned_to = '' OR assigned_to = ' ')
           AND schedule_at <= now()
         ORDER BY schedule_at ASC
         LIMIT 1
-    """).named_results()
+    """).named_results())
     if rows:
         mobile = rows[0]['mobile']
         ch().command(f"""
@@ -879,7 +879,7 @@ def assign_next():
         return _assign_and_redirect(mobile)
 
     # 3) Fresh lead: not assigned and not attempted in recent hours by anyone
-    rows = ch().query(f"""
+    rows = list(ch().query(f"""
         WITH recent_cutoff AS (now() - INTERVAL {RECENT_HOURS_COOLDOWN} HOUR)
         SELECT L.Mobile AS mobile
         FROM {LEADS_TABLE} AS L
@@ -897,7 +897,7 @@ def assign_next():
           )
         ORDER BY L.Lead_date DESC
         LIMIT 1
-    """).named_results()
+    """).named_results())
 
     if rows:
         return _assign_and_redirect(rows[0]['mobile'])
